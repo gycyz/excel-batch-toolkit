@@ -108,8 +108,8 @@ class MergeTab(BaseTab):
         self.app.log(f"开始合并：{folder}", "info")
 
         def work():
-            n_files, n_rows = merge_files(folder, out, self.recursive.get())
-            return f"合并完成：{n_files} 个文件，{n_rows} 行数据 → {out}"
+            res = merge_files(folder, out, self.recursive.get())
+            return "\n".join(res.lines(out))
 
         self.app.run_job(work)
 
@@ -222,7 +222,7 @@ class CsvTab(BaseTab):
 
         def work():
             n = to_csv_files(folder, outdir, self.recursive.get())
-            return f"转换完成：{n} 个文件 → {outdir}"
+            return f"转换完成：写出 {n} 个 CSV 文件 → {outdir}"
 
         self.app.run_job(work)
 
@@ -304,6 +304,8 @@ class App(tk.Tk):
             try:
                 summary = work()
                 self._q.put(("done", str(summary)))
+            except PermissionError as e:
+                self._q.put(("error", f"写入被拒绝，目标文件可能正被 Excel 打开，关掉再试：{e}"))
             except Exception as e:
                 self._q.put(("error", f"{type(e).__name__}: {e}"))
 
