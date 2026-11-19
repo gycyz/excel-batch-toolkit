@@ -1,0 +1,14 @@
+# 打包产物（76 MB，可由 PyInstaller 重新生成）
+dist/
+build/
+*.spec.bak
+
+# 运行产物（样例输出，跑一次就有）
+合并结果.xlsx
+拆分结果/
+csv结果/
+
+# 缓存与日志
+__pycache__/
+*.pyc
+_日志/
