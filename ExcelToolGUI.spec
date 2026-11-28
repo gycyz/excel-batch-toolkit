@@ -1,12 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_all
+
+# 拖入支持需要 tkinterdnd2 自带的 tkdnd 二进制
+_dnd_datas, _dnd_binaries, _dnd_hidden = collect_all('tkinterdnd2')
 
 
 a = Analysis(
     ['gui.py'],
     pathex=[],
-    binaries=[],
-    datas=[],
-    hiddenimports=[],
+    binaries=_dnd_binaries,
+    datas=_dnd_datas,
+    hiddenimports=_dnd_hidden,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -12,3 +12,6 @@ csv结果/
 __pycache__/
 *.pyc
 _日志/
+
+# 交付包（38 MB，exe 走 Release 发）
+发布/

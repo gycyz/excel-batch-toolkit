@@ -63,6 +63,10 @@ class BaseTab(ttk.Frame):
         self.action_btn = ttk.Button(bar, text=text, style="Go.TButton", command=cmd)
         self.action_btn.pack(in_=bar, side="left", padx=(18 if extra is not None else 0, 0))
 
+    def apply_drop(self, paths: list[str]) -> bool:
+        """子类覆盖：把拖进来的路径填到本页签。返回是否接受。"""
+        return False
+
     def buttons(self) -> list[ttk.Button]:
         return [self.action_btn] if self.action_btn else []
 
@@ -114,6 +118,16 @@ class MergeTab(BaseTab):
         self.app.run_job(work)
 
 
+    def apply_drop(self, paths: list[str]) -> bool:
+        p = Path(paths[0])
+        folder = p if p.is_dir() else p.parent
+        self.folder.set(str(folder))
+        if not self.outfile.get().strip():
+            self.outfile.set(str(folder / "合并结果.xlsx"))
+        self.app.log(f"已接收：{folder}", "ok")
+        return True
+
+
 class SplitTab(BaseTab):
     TITLE = "按列拆分"
 
@@ -140,8 +154,23 @@ class SplitTab(BaseTab):
 
     def _pick_file(self):
         p = filedialog.askopenfilename(title="选择要拆分的 Excel", filetypes=[("Excel 文件", "*.xlsx")])
-        if not p:
-            return
+        if p:
+            self._load_file(p)
+
+    def apply_drop(self, paths: list[str]) -> bool:
+        p = Path(paths[0])
+        if p.is_dir():
+            self.outdir.set(str(p))
+            self.app.log(f"拆分结果将保存到：{p}", "ok")
+            return True
+        if p.suffix.lower() != ".xlsx":
+            self.app.log(f"只支持 .xlsx，拖进来的是「{p.suffix or '无后缀'}」", "err")
+            return False
+        self._load_file(str(p))
+        return True
+
+    def _load_file(self, p: str):
+        """设置待拆分文件并读出表头（选择按钮与拖入共用）。"""
         self.file.set(p)
         if not self.outdir.get().strip():
             self.outdir.set(str(Path(p).parent / "拆分结果"))
@@ -227,10 +256,56 @@ class CsvTab(BaseTab):
         self.app.run_job(work)
 
 
-class App(tk.Tk):
+    def apply_drop(self, paths: list[str]) -> bool:
+        p = Path(paths[0])
+        folder = p if p.is_dir() else p.parent
+        self.folder.set(str(folder))
+        if not self.outdir.get().strip():
+            self.outdir.set(str(folder / "csv结果"))
+        self.app.log(f"已接收：{folder}", "ok")
+        return True
+
+
+def friendly_error(exc: BaseException) -> str:
+    """把异常翻译成甲方能看懂的话，末尾保留原始信息方便排查。"""
+    name, msg = type(exc).__name__, str(exc).strip()
+    low = msg.lower()
+    tail = f"（原始信息：{name}: {msg}）"
+
+    if isinstance(exc, PermissionError) or "permission" in low:
+        return ("写不进去：目标文件可能正被 Excel 打开，或者这个文件夹你没有写入权限。\n"
+                "先把 Excel 关掉再试一次，或者换一个输出文件夹。\n" + tail)
+    if isinstance(exc, FileNotFoundError):
+        return ("找不到文件或文件夹：选中的路径可能已经被移走或改名了。\n"
+                "重新选一次目录再试。\n" + tail)
+    if isinstance(exc, (ValueError, KeyError)):
+        return ("这些表格读不进来，常见三种原因：\n"
+                "① 是 .xls 老格式（本工具目前只支持 .xlsx）\n"
+                "② 表格在子文件夹里，但没勾「包含子文件夹」\n"
+                "③ 文件是空的，或者表头不在第一行\n" + tail)
+    if isinstance(exc, ImportError) or "no module" in low:
+        return ("缺少运行组件，程序不完整。\n"
+                "如果是从压缩包拿到的，请把整个文件夹一起解压，不要只把 exe 拎出来。\n" + tail)
+    return ("程序碰到了没预料到的问题，不是你的操作出错。\n"
+            "把下面这段整段截图发给我就能定位：\n" + tail)
+
+
+try:  # 拖入支持：装了 tkinterdnd2 就启用，没装就退回"浏览"按钮
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+    _DND = True
+except Exception:  # noqa: BLE001
+    DND_FILES = None
+    TkinterDnD = None
+    _DND = False
+
+
+_BaseTk = TkinterDnD.Tk if _DND else tk.Tk
+
+
+class App(_BaseTk):
     def __init__(self):
         super().__init__()
-        self.title("Excel 批量工具箱 v1.0")
+        self.title("Excel 批量工具箱 v1.1")
         self.minsize(780, 560)
         self._q: queue.Queue = queue.Queue()
         self._busy = False
@@ -239,7 +314,7 @@ class App(tk.Tk):
         self._setup_style()
         self._center(900, 680)
 
-        nb = ttk.Notebook(self)
+        self.nb = nb = ttk.Notebook(self)
         nb.pack(fill="x", expand=False, padx=12, pady=(12, 8))
         for cls in (MergeTab, SplitTab, CsvTab):
             tab = cls(nb, self)
@@ -255,12 +330,59 @@ class App(tk.Tk):
         self.log_text.tag_config("err", foreground="#c62828")
         self.log_text.tag_config("info", foreground="#555555")
 
+        # A3：不确定态进度条，只在任务运行时出现，避免「看着像没动」
+        self.progress = ttk.Progressbar(self, mode="indeterminate")
+
         self.status = tk.StringVar(value="就绪")
         ttk.Label(self, textvariable=self.status, anchor="w",
                   padding=(14, 3)).pack(fill="x", side="bottom")
 
         self.log("Excel 批量工具箱已启动。选择目录或文件后点击开始。", "info")
-        self.after(120, self._poll)
+        self._install_dnd()
+        self._poll_id = self.after(120, self._poll)
+
+    def destroy(self):
+        """关窗口时先取消轮询定时器，否则 Tcl 会报 invalid command name。"""
+        try:
+            if getattr(self, "_poll_id", None):
+                self.after_cancel(self._poll_id)
+                self._poll_id = None
+        except Exception:  # noqa: BLE001
+            pass
+        super().destroy()
+
+    def report_callback_exception(self, exc, val, tb):
+        """Tk 回调里的异常别只写 stderr（窗口版看不见），直接进日志窗。"""
+        self._append(f"[界面异常] {exc.__name__}: {val}", "err")
+
+    # ---------- 拖入 ----------
+
+    def _install_dnd(self):
+        if not _DND:
+            return
+        try:
+            self.drop_target_register(DND_FILES)
+            self.dnd_bind("<<Drop>>", self._on_drop)
+            self.log("提示：文件夹或 Excel 文件可以直接拖进这个窗口。", "info")
+        except Exception as e:  # noqa: BLE001
+            self.log(f"拖入功能未启用（{type(e).__name__}），用「浏览」按钮一样可以。", "info")
+
+    def _on_drop(self, event):
+        try:
+            paths = [p for p in (s.strip() for s in self.tk.splitlist(event.data)) if p]
+        except Exception:  # noqa: BLE001
+            paths = [str(event.data).strip()]
+        if paths:
+            try:
+                tab = self.nb.nametowidget(self.nb.select())
+                apply = getattr(tab, "apply_drop", None)
+                if apply is None:
+                    self.log("这个页签不支持拖入，请用「浏览」按钮。", "err")
+                else:
+                    apply(paths)
+            except Exception as e:  # noqa: BLE001
+                self.log(f"拖入处理失败：{type(e).__name__}: {e}", "err")
+        return "break"
 
     # ---------- 外观 ----------
 
@@ -299,35 +421,42 @@ class App(tk.Tk):
         self._busy = True
         self._set_buttons(False)
         self.status.set("处理中…")
+        self.progress.pack(fill="x", padx=14, pady=(0, 2), side="bottom")
+        self.progress.start(12)
 
         def worker():
             try:
                 summary = work()
                 self._q.put(("done", str(summary)))
-            except PermissionError as e:
-                self._q.put(("error", f"写入被拒绝，目标文件可能正被 Excel 打开，关掉再试：{e}"))
-            except Exception as e:
-                self._q.put(("error", f"{type(e).__name__}: {e}"))
+            except Exception as e:  # noqa: BLE001
+                self._q.put(("error", friendly_error(e)))
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _poll(self):
         try:
             while True:
-                item = self._q.get_nowait()
-                kind = item[0]
-                if kind == "log":
-                    self._append(item[1], item[2])
-                elif kind == "done":
-                    for line in item[1].splitlines():
-                        self._append(line, "ok")
-                    self._finish(False)
-                elif kind == "error":
-                    self._append("[失败] " + item[1], "err")
+                try:
+                    item = self._q.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    kind = item[0]
+                    if kind == "log":
+                        self._append(item[1], item[2])
+                    elif kind == "done":
+                        for line in item[1].splitlines():
+                            self._append(line, "ok")
+                        self._finish(False)
+                    elif kind == "error":
+                        self._append("[失败] " + item[1], "err")
+                        self._finish(True)
+                except Exception as e:  # noqa: BLE001
+                    # 单条消息出错不能打死轮询，否则按钮永远恢复不了
+                    self._append(f"[内部错误] {type(e).__name__}: {e}", "err")
                     self._finish(True)
-        except queue.Empty:
-            pass
-        self.after(120, self._poll)
+        finally:
+            self._poll_id = self.after(120, self._poll)
 
     def _append(self, text: str, tag: str = "info"):
         stamp = datetime.now().strftime("%H:%M:%S")
@@ -343,6 +472,8 @@ class App(tk.Tk):
 
     def _finish(self, error: bool):
         self._busy = False
+        self.progress.stop()
+        self.progress.pack_forget()
         self._set_buttons(True)
         self.status.set("出错，请查看日志" if error else "完成")
 
